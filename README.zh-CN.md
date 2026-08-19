@@ -56,6 +56,7 @@ Cloudflare OS 不仅仅是又一个带连接器的聊天框。整个系统围绕
 当你在 Cloudflare OS 中创建一份幻灯片时，你并不是在调用某个运行在云端的 SaaS 软件。系统会*专为你*创建一个幻灯片软件的*私有实例*。我们称之为“gadget”。这个实例运行在一个与其他所有人的幻灯片相隔离的独立沙箱中。
 
 这带来两个深远的影响：
+
 1. 幻灯片应用不可能存在把你的幻灯片泄露给攻击者的安全漏洞。Cloudflare OS 沙箱控制着对你的应用私有实例的一切访问。
 2. 如果你愿意，你可以自由地修改代码。如果幻灯片应用缺少你需要的功能，你只要让你的 agent 加上即可。而且由于第 1 点，这样做完全安全。
 
@@ -66,6 +67,7 @@ Cloudflare OS 不仅仅是又一个带连接器的聊天框。整个系统围绕
 Gatekeeper 就像是超级增强版的 MCP 服务器。
 
 当你把某个外部资源介绍给 agent 或 Gadget 时，就会创建一个 Gatekeeper 来管理这次访问。Gatekeeper 是针对每个外部服务的专用软件，它调解 Gadget 与该服务之间的连接。它会：
+
 * 为该服务提供一套整洁的 Cap'n Web API（包装该服务原生提供的任何 API）。
 * 处理授权（例如通过 OAuth）。
 * 强制将访问范围收窄到用户本意指定的那个具体资源。
@@ -95,7 +97,7 @@ Cloudflare OS 的基本用户体验有点类似在线办公套件，比如 Googl
 “OS”这个说法并不*完全*是营销话术。在技术层面上，Cloudflare OS 确实与一个操作系统有着真实的类比关系：
 
 | 传统 OS        | Cloudflare OS              |
-|----------------|----------------------------|
+| -------------- | -------------------------- |
 | kernel         | packages/workshop-backend  |
 | device drivers | packages/gatekeeper-*      |
 | shell          | packages/workshop-frontend |
@@ -137,7 +139,8 @@ Cloudflare OS 的编码 agent 实际上是一个完全多用途的 agent，可�
 
 每个用 Cloudflare OS 构建的应用都自动拥有一个对 agent 友好的 API。这意味着，在你让 AI 构建完应用之后，你还可以让 AI 在应用*内部*与你协作。无需构建 MCP 服务器，也无需集成定制的 agent 循环——它默认就在那里。
 
-这之所以可行，是因为 Gadget 的客户端和服务端部分必须通过 [Cap'n Web RPC](https://github.com/cloudflare/capnweb) 通信。这是双赢的：
+这之所以可行，是因为 Gadget 的客户端和服务端部分必须通过 [Cap&#39;n Web RPC](https://github.com/cloudflare/capnweb) 通信。这是双赢的：
+
 1. Cap'n Web 的样板代码极少，这让 agent 很容易使用。你基本上只需在服务端定义一个方法，然后从客户端调用它，就像本地调用一样。
 2. 与此同时，这意味着服务端必然暴露出一个易于理解的 API，agent 可以直接调用。AI agent 运行框架使用 [Code Mode](https://blog.cloudflare.com/code-mode/) 进行工具调用，因此把 Gadget 的 API 直接暴露给 agent 调用是轻而易举的。
 
@@ -158,6 +161,7 @@ Cloudflare OS 的编码 agent 实际上是一个完全多用途的 agent，可�
 ### 默认沙箱化，默认安全
 
 每个 Gadget 都运行在一个安全的沙箱中，未经你明确同意，它完全无法与互联网通信。具体来说：
+
 * 服务端运行在一个[已禁用互联网访问的 Dynamic Worker](https://blog.cloudflare.com/dynamic-workers/) 中。它只能通过 [Workers Bindings](https://blog.cloudflare.com/workers-environment-live-object-bindings/) 与你明确指定的特定外部资源通信。
 * 客户端代码运行在一个沙箱化的 iframe 中。这个 iframe 只能通过由父框架经 `postMessage()` 提供的 Cap'n Web RPC 会话与其服务端通信。除此之外，iframe 被阻止访问互联网（在浏览器允许的最大范围内，通过 `Content-Security-Policy` 和 iframe 沙箱设置实现）。
 

@@ -173,6 +173,124 @@ Cloudflare OS 的编码 agent 实际上是一个完全多用途的 agent，可�
 
 这与大多数 agent 运行框架不同：在那些框架中，MCP 服务器是预先配置好的，你所有服务的广泛访问权限在每次对话中都天然地提供给 agent。基于能力的介绍机制让每个 agent 都被限制在它完成手头工作实际需要的访问范围内。
 
+## 技术架构与技术栈
+
+> 本节为中文版专属补充，帮助你快速了解代码库的组织方式、运行时架构以及从哪里开始读代码。
+
+### 整体架构：monorepo
+
+整个项目是一个 pnpm workspace 的 monorepo，所有可部署的 Worker 和共享库都在 `packages/` 目录下：
+
+```
+cloudflare-os/
+├── package.json                # 根脚本：run-local / dev-server / dev-client / build / test
+├── pnpm-workspace.yaml         # workspace 定义 + catalog（统一锁定工具链版本）
+├── wrangler.jsonc              # 根 worker：dev-router（公开入口/本地路由）
+├── scripts/
+│   ├── run-local.ts            # pnpm run-local 的实现
+│   ├── run-dev-server.ts       # pnpm dev-server 的实现
+│   └── release/                # 发布管线（构建/上传/晋升）
+└── packages/
+    ├── router/                 # 实例的公开入口 Worker（dev-router）
+    ├── workshop-backend/       # 「内核」：沙箱、访问控制、用户/工作区 Durable Object
+    ├── workshop-frontend/      # Gadgets Workshop UI（纯客户端 SPA）
+    ├── workshop-shared/        # 前后端共享的 Cap'n Web RPC 接口定义
+    ├── gatekeeper-*/           # 各外部服务的 Gatekeeper Worker（GitHub、Google、Slack 等）
+    ├── mcp-shared/             # 两个 MCP gatekeeper 共享的实现库（非 Worker）
+    ├── configurator-ui/        # gatekeeper 资源配置器 UI 的类型级组件助手
+    ├── backend-utils/          # 后端共享工具（日志等）
+    ├── error-reporting/        # 错误上报共享模块
+    ├── typed-storage/          # 带类型的存储封装
+    └── integration-tests/      # 集成测试
+```
+
+各核心包的职责：
+
+| 包                             | 角色     | 说明                                                                                                                                                                                                                                                                                       |
+| ------------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/router`            | 公开入口 | 部署实例的唯一公开域名。按路径前缀路由：`/gatekeeper/<name>/*` 转发给对应的 gatekeeper Worker（通过扫描自身的 `GATEKEEPER_*` service binding 自动发现，安装新 gatekeeper 只需加一个绑定），`/api/*` 和 `/blueprint-screenshot/*` 转发给 workshop-backend，其余请求交给前端静态资源 |
+| `packages/workshop-backend`  | 内核     | 运行在 Cloudflare Workers 上，类比操作系统的内核：连接用户与 Gadget/Gatekeeper，通过沙箱和访问控制实现安全。项目对它有最高的代码审查标准                                                                                                                                                   |
+| `packages/workshop-frontend` | Shell    | 纯单页应用（SPA），完全运行在浏览器中，通过持久 WebSocket 上的 RPC 与后端通信                                                                                                                                                                                                              |
+| `packages/workshop-shared`   | 接口层   | 定义前后端之间的 RPC 接口（Cap'n Web 协议），是客户端与服务端的契约                                                                                                                                                                                                                        |
+| `packages/gatekeeper-*`      | 设备驱动 | 每个 gatekeeper 是一个独立的 Cloudflare Worker，负责某个外部服务的 OAuth 流程和沙箱化 API 访问                                                                                                                                                                                             |
+
+### 运行时架构
+
+Cloudflare OS 构建在 Cloudflare Workers 平台之上，深度使用了三个关键原语：
+
+* **Durable Objects**：Cloudflare 的有状态无服务器原语。每个用户、每个工作区（workspace）都是它自己的 Durable Object，这也是实时多人协作得以实现的基础。
+* **Dynamic Workers + Facets**：每个 Gadget 的服务端代码运行在一个 Dynamic Worker Facet 中——一个被禁用了互联网访问的隔离沙箱，只能通过 Workers Bindings 与你明确授权的外部资源通信。Gatekeeper 也会向每个工作区安装 facet 来管理对远程服务的访问。
+* **Service Bindings**：Worker 之间不通过 HTTP 公网通信，而是通过 Workers 的 service binding 直接互联（例如 dev-router 绑定 `WORKSHOP_BACKEND` 和全部 `GATEKEEPER_*`），本地开发时由 wrangler/workerd 模拟同样的拓扑。
+
+整个系统也可以完全运行在开源的 `workerd` 运行时上（`pnpm run-local` 在底层就是这么做的），不依赖 Cloudflare 的托管服务。
+
+### 通信协议：Cap'n Web RPC
+
+前端与后端、Worker 与 Worker 之间的通信统一使用 [Cap&#39;n Web](https://github.com/cloudflare/capnweb) RPC：
+
+* **浏览器 ↔ 后端**：在一条持久 WebSocket 上建立 RPC 会话。`workshop-shared` 中定义的接口（如 `PublicApi`、`AuthenticatedApi`）是双方共享的类型契约——在服务端定义一个方法，客户端就能像本地调用一样 await 它。
+* **Worker ↔ Worker**：复用 Cloudflare 的 Worker-to-Worker RPC 语义，经 service binding 直连。
+* **运行时校验**：后端构建时经 `capnweb-validate` 处理（`@validateRpc()` 装饰器），在运行时对 RPC 参数做类型校验。
+* **agent 调用**：AI agent 使用 Code Mode——通过编写并立即执行代码片段来直接调用 Gadget 和 Gatekeeper 暴露的 RPC API。
+
+### 技术栈
+
+**前端（`packages/workshop-frontend`）**：
+
+| 类别        | 技术                                           |
+| ----------- | ---------------------------------------------- |
+| 框架        | React 19（StrictMode）                         |
+| 路由        | TanStack Router                                |
+| 构建        | Vite 7                                         |
+| UI 组件     | Kumo UI（`@cloudflare/kumo`）+ Phosphor 图标 |
+| 样式        | Tailwind CSS 4                                 |
+| 协同/编辑器 | Yjs（代码与状态同步）、Monaco Editor           |
+| RPC 客户端  | capnweb（WebSocket 会话）                      |
+
+**后端与工具链**：
+
+| 类别     | 技术                                                                        |
+| -------- | --------------------------------------------------------------------------- |
+| 语言     | TypeScript 7（原生编译器 tsgo 做类型检查）                                  |
+| 运行时   | Cloudflare Workers / workerd（开源）                                        |
+| AI agent | pi-agent-core / pi-ai（一个 API 支持所有 LLM 提供商）                       |
+| 测试     | vitest 4，分 Node 与 workerd（`@cloudflare/vitest-pool-workers`）两套工程 |
+| 包管理   | pnpm 11（workspace + catalog 统一锁版本，`minimumReleaseAge` 供应链策略） |
+| 本地开发 | wrangler 4（`wrangler dev` 多 Worker 编排）                               |
+| 任务编排 | vite-plus（`vp`，带缓存的 monorepo 任务运行器）                           |
+| RPC 校验 | capnweb-validate（与 capnweb 锁步发版）                                     |
+
+工具链版本在 `pnpm-workspace.yaml` 的 `catalog` 中声明一次，全仓库共享。
+
+### 代码入口
+
+想读代码或调试时，可以从这几个入口入手：
+
+**本地启动链路**：
+
+| 命令                | 入口脚本                                   | 作用                                                                                                                                                                                                  |
+| ------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm run-local`  | `scripts/run-local.ts`                   | 一键体验：按需安装依赖、构建前端产物（`vite build` → `packages/workshop-frontend/dist`），然后启动本地服务器，在 http://localhost:8787 提供完整服务（前端静态资源由 backend 的 assets 绑定托管） |
+| `pnpm dev-server` | `scripts/run-dev-server.ts`              | 开发模式后端：为每个包生成`wrangler.dev.jsonc`（动态装配 service binding），加载根目录 `.dev.vars`，然后启动 `wrangler dev`，默认监听 8787                                                      |
+| `pnpm dev-client` | `packages/workshop-frontend` 的 `vite` | 开发模式前端：Vite dev server，访问 http://localhost:3000（带 HMR）                                                                                                                                   |
+
+**请求处理入口**：
+
+| 层         | 入口文件                                                      | 说明                                                                                                                                                                                                                                                                                                                    |
+| ---------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 路由层     | `packages/router/src/index.ts`                              | 根`wrangler.jsonc` 的 `main`。`fetch` 处理器按路径前缀转发：`/gatekeeper/<name>/*` → 对应 gatekeeper；`/api/*`、`/blueprint-screenshot/*` → workshop-backend；其余 → 前端静态资源（生产）或 backend（run-local）                                                                                         |
+| 前端       | `packages/workshop-frontend/index.html` → `src/main.tsx` | SPA 挂载点：`createRoot` 渲染 TanStack Router，并通过 `newWebSocketRpcSession` 建立到后端 `PublicApi` 的 Cap'n Web 会话（含断线重连管理）                                                                                                                                                                         |
+| 后端       | `packages/workshop-backend/src/server.ts`                   | 内核的 Worker 入口。实现`PublicApi`/`AuthenticatedApi` RPC 接口，并导出全部 Durable Object 类（`UserDurableObject`、`OverseerDurableObject`、`AdminSettings` 等）供 wrangler 绑定。构建时经 `capnweb-validate` 输出到 `.wrangler/validate/src/server.ts`，后者是 `wrangler.jsonc` 中实际配置的 `main` |
+| Gatekeeper | `packages/gatekeeper-*/src/` 各自的入口                     | 每个 gatekeeper 是独立 Worker，入口在各自的`wrangler.jsonc` 中声明                                                                                                                                                                                                                                                    |
+
+### 发布管线
+
+`scripts/release/` 实现了面向客户实例的发布流程：
+
+1. `build-release.ts` 用锁定的 wrangler 对每个可部署 Worker 做 dry-run 构建，保证产物字节级一致（byte-identical），并生成发布 manifest——这是本仓库 CI 与部署服务之间的契约；
+2. `upload-release.ts` 将产物按内容寻址（content-addressed）上传到 R2，manifest 最后上传；带 `--candidate` 时先落在 `candidates/<id>/` 供 e2e 验证；
+3. `promote-release.ts` 把 manifest 复制到 `releases/<id>/`——发布就是这一次原子的 manifest 复制。
+
 ## 开始使用
 
 ### 部署到你的 Cloudflare 账户
